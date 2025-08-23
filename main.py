@@ -1,5 +1,6 @@
 import asyncio
 import os
+import time
 import pandas as pd
 from dotenv import load_dotenv
 from pyrogram import Client, filters
@@ -9,7 +10,27 @@ load_dotenv()
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 SESSION_NAME = os.getenv("SESSION_NAME")
-SEARCH_LIMIT = int(os.getenv("SEARCH_LIMIT", "50"))
+
+PORTALS_AUTH_CACHE: dict[str, str] = {}
+PORTALS_AUTH_TS: float | None = None
+PORTALS_AUTH_TTL = 30 * 60
+
+async def get_portals_auth() -> str:
+    """Возвращает auth для Portals, с кэшем (чтобы не дергать Telegram каждый раз)."""
+    global PORTALS_AUTH_TS
+    hardcoded = os.getenv("PORTALS_HARDCODED_AUTH")
+    if hardcoded:
+        return hardcoded
+
+    now = time.time()
+    if PORTALS_AUTH_TS and (now - PORTALS_AUTH_TS) < PORTALS_AUTH_TTL and "token" in PORTALS_AUTH_CACHE:
+        return PORTALS_AUTH_CACHE["token"]
+
+    token = await portals_update_auth(API_ID, API_HASH)
+    PORTALS_AUTH_CACHE["token"] = token
+    PORTALS_AUTH_TS = now
+    return token
+
 
 MODEL_TO_COLORS: dict[str, set[str]] = {}
 mapping = pd.read_csv("model-backdrop-match.csv")
@@ -19,7 +40,7 @@ models = list(mapping['col'].unique())
 for _, row in mapping.iterrows():
     MODEL_TO_COLORS.setdefault(row["col"], set()).add(row["name"])
 
-app = Client(SESSION_NAME, api_id=API_ID, api_hash=API_HASH)
+app = Client(SESSION_NAME, api_id=API_ID, api_hash=API_HASH, workdir=".", plugins=None, in_memory=True)
 
 
 @app.on_message(filters.me & filters.command("search", prefixes=["/", "!", "."]))
@@ -33,7 +54,7 @@ async def cmd_search(_, msg):
     await msg.reply_text(f"Searching '{model}' (raw).")
 
     try:
-        auth = await portals_update_auth(API_ID, API_HASH)
+        auth = await get_portals_auth()
         items = portals_search(sort="price_asc", gift_name=model, authData=auth) or []
         for item in items:
             attributes = item.get("attributes", [])
@@ -51,32 +72,26 @@ async def cmd_search(_, msg):
 @app.on_message(filters.me & filters.command("start", prefixes=["/", "!", "."]))
 async def cmd_start(_, msg):
     idx = 0
-    await msg.reply_text("Начинаю бесконечный обход моделей...")
+    await msg.reply_text("Pinging models")
     while True:
         model = models[idx]
         try:
-            auth = await portals_update_auth(API_ID, API_HASH)
-            items = portals_search(sort="price_asc", limit=SEARCH_LIMIT, gift_name=model, authData=auth) or []
+            auth = await get_portals_auth()
+            items = portals_search(sort="price_asc", gift_name=model, authData=auth) or []
 
-            allowed = MODEL_TO_COLORS.get(model, set())
-            if allowed:
-                items = [
-                    it for it in items
-                    if (lambda b: b in allowed)(
-                        next((a.get("value").lower().strip() for a in it.get("attributes", []) if a.get("type") == "backdrop"), "")
-                    )
-                ]
-
-            print(f"[LOOP:{model}] {len(items)} items")
-            if items:
-                await msg.reply_text(f"[{model}] нашёл {len(items)} штук, первая цена {items[0].get('price')} TON")
+            for item in items:
+                attributes = item.get("attributes", [])
+                for attr in attributes:
+                    if attr.get("type") == "backdrop":  
+                        backdrop_value = attr.get("value").lower().strip()
+                        if backdrop_value in MODEL_TO_COLORS.get(model, set()):
+                            print(f"[PORTALS] Name:{item['name']}, Price:{item['price']}, Floor:{item['floor_price']}")
 
         except Exception as e:
-            print(f"[LOOP:{model}] ERROR: {e}")
+            await msg.reply_text(f"[PORTALS ERROR] {e}")
 
         idx = (idx + 1) % len(models)
-        await asyncio.sleep(2)  
-
+        await asyncio.sleep(0.3)
 
 if __name__ == "__main__":
     app.run()
