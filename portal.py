@@ -71,12 +71,13 @@ class Portals:
                 logger.warning(f"CSV file not found: {self.csv_path}")
                 return
                 
-            with open(self.csv_path, 'r', encoding='utf-8') as f:
+            with open(self.csv_path, 'r', encoding='utf-8-sig') as f:
                 reader = csv.DictReader(f)
                 for row in reader:
-                    model = row.get('\ufeff"col"', '').lower().strip()
+                    # Убираем BOM символы из названий колонок
+                    model = row.get('col', row.get('\ufeffcol', '')).lower().strip()
                     backdrop = row.get('name', '').lower().strip()
-                    print(row, model, backdrop)
+                    
                     if model and backdrop:
                         self.model_to_colors.setdefault(model, set()).add(backdrop)
                         
@@ -199,6 +200,7 @@ class Portals:
         batch_size: int = 5,
         should_continue: Optional[Callable[[], bool]] = None,
     ) -> None:
+        
         if not self.models:
             logger.error("No models loaded; loop aborted.")
             return
